@@ -1,12 +1,8 @@
 checkpoint_sdk documentation
 ****************************
 
-Add your content using "reStructuredText" syntax. See the
-reStructuredText documentation for details.
-
 
 Contents:
-^^^^^^^^^
 
 * checkpoint_sdk package
 
