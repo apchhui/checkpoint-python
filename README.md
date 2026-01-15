@@ -7,6 +7,8 @@ Solana SDK for:
 - Wallet utilities
 - etc.
 
+Wallet Manager is beta!!!
+
 # Installation with pip
 
 ```bash
