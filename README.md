@@ -27,4 +27,4 @@ print(result)
 ```
 
 # Documentation:
-ToDo
+(https://github.com/apchhui/checkpoint-python/tree/main/docs)
