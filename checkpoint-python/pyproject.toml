@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "checkpoint-sdk"
-version = "0.1.1"
+version = "0.2.0"
 description = "Program-agnostic Solana IDL transaction decoder and SDK"
 readme = "README.md"
 license = { text = "MIT" }

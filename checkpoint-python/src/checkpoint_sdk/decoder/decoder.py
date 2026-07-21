@@ -1,15 +1,33 @@
 ### --!-- --!-- --!-- better not to use python in Solana high performance production apps --!-- --!-- --!-- ###
+import re
 import requests
 from typing import Optional, Dict, Any, Tuple, List
 from checkpoint_sdk.decoder.exceptions import TooManyElements, NoElements
 import base64
 import struct
 
+_INVOKE_RE = re.compile(r"^Program (\w+) invoke \[(\d+)\]$")
+_RESULT_RE = re.compile(r"^Program (\w+) (success|failed)")
+
 class Decoder:
     MAX = 6
-    IDLs = []
 
-    def __init__(self, programs):
+    def __init__(self, programs, idls: Optional[Dict[str, Dict[str, Any]]] = None):
+        """
+        programs: program addresses to decode events for.
+        idls: optional {program_address: idl_dict} of pre-loaded IDLs. Any
+            program_address found here skips the live fetch entirely - useful
+            because the built-in fetch hits an undocumented Solscan endpoint
+            that returns 403 for non-browser requests fairly often. Fetch
+            your own IDL (e.g. from the program's public source repo, or by
+            reading its on-chain IDL account) and pass it here instead of
+            relying on that endpoint.
+        """
+        # IDLs used to be a class attribute here, which meant every Decoder
+        # instance in a process shared (and kept appending to) the same list.
+        # It's an instance attribute now.
+        self.IDLs = []
+
         programs_count = len(programs)
 
         if programs_count > self.MAX:
@@ -21,8 +39,9 @@ class Decoder:
                 f"No programs on input! Expected MIN: 1 | MAX: {self.MAX} elements array"
             )
 
+        idls = idls or {}
         for program_address in programs:
-            idl = self._fetch_idl(program_address)
+            idl = idls.get(program_address) or self._fetch_idl(program_address)
             self.IDLs.append(idl)
     
     def _find_idl(self, program_address: str):
@@ -238,10 +257,46 @@ class Decoder:
 
         raise ValueError(f"Unknown IDL type: {t}")
 
+    def _attribute_program_data(self, logs: List[str]) -> List[Tuple[Optional[str], str]]:
+        """
+        Walk the logs' actual invoke/success call stack and return
+        (program_id, base64_data) for every `Program data:` line, attributed
+        to whichever program was really executing when it was logged.
+
+        This replaces a heuristic that assumed a `Program data:` line always
+        precedes the *next* invoke of the same program - true often enough to
+        look right, but wrong on transactions with nested self-CPI event
+        logging, where a different program's data line can end up immediately
+        before your target program's invoke line.
+        """
+        stack: List[str] = []
+        result: List[Tuple[Optional[str], str]] = []
+
+        for line in logs:
+            if not isinstance(line, str):
+                continue
+
+            m = _INVOKE_RE.match(line)
+            if m:
+                stack.append(m.group(1))
+                continue
+
+            m = _RESULT_RE.match(line)
+            if m and stack and stack[-1] == m.group(1):
+                stack.pop()
+                continue
+
+            if line.startswith("Program data:"):
+                current = stack[-1] if stack else None
+                result.append((current, line.replace("Program data:", "").strip()))
+
+        return result
+
     def extract_program_data(self, tx: Dict, program_address: str) -> Optional[str]:
         """
-        This function only works in some cases!!!
-        Be care using it, not always we can find correct str, so in most cases you need to find base64 data at your own
+        Finds the first `Program data:` log line actually emitted while
+        `program_address` was executing, using the real invoke/success call
+        stack rather than assuming line order.
         """
         params = tx.get("params")
         if not params:
@@ -254,22 +309,14 @@ class Decoder:
         value = results.get("value")
         if not value:
             return None
-        
+
         logs = value.get("logs")
         if not isinstance(logs, list):
             return None
 
-        for i in range(len(logs) - 1):
-            line = logs[i]
-            next_line = logs[i + 1]
-
-            if (
-                isinstance(line, str)
-                and line.startswith("Program data:")
-                and isinstance(next_line, str)
-                and next_line.startswith(f"Program {program_address} invoke")
-            ):
-                return line.replace("Program data:", "").strip()
+        for prog, data in self._attribute_program_data(logs):
+            if prog == program_address:
+                return data
 
         return None
 
@@ -284,7 +331,6 @@ class Decoder:
         """
         Extracts all `Program data:` strings from tx, so you can use it to `unsafe` parse all your strings using batch_decode()
         """
-        result = []
         params = tx.get("params")
         if not params:
             return None
@@ -296,21 +342,14 @@ class Decoder:
         value = results.get("value")
         if not value:
             return None
-        
+
         logs = value.get("logs")
         if not isinstance(logs, list):
             return None
 
-        for i in range(len(logs) - 1):
-            line = logs[i]
-
-            if (
-                isinstance(line, str)
-                and line.startswith("Program data:")
-            ):
-                result.append(line.replace("Program data:", "").strip())
-
-        return result
+        # (previously `range(len(logs) - 1)`, which silently dropped a
+        # `Program data:` line if it happened to be the very last log line)
+        return [data for _prog, data in self._attribute_program_data(logs)]
 
     def batch_decode(self, extract_all_program_data_result: list, program_address: str) -> Optional[List[dict]]:
         results = {}
